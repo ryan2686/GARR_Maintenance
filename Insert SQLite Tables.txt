@@ -1,0 +1,18 @@
+
+
+
+
+create table GACC(ACCTNUM character(10) PRIMARY KEY NOT NULL, ACCTNAME character(50), TYPE character(1) NOT NULL, LASTDATE datetime, USERID character(20), M_1099ACCT character(1), DPRSTR character(1), PEXCHTYPE character(1), OWNERTAX character(1), SUBWITH character(1), ACCTBASIS character(1), LEGALACCT character(1), ACTIVE character(1) NOT NULL, KEY INT, PARENT INT);
+create table GARH(GROUPID character(15) PRIMARY KEY NOT NULL, LEDGCODE character(2) NOT NULL, DESCRPTN character(40), LASTDATE datetime, USERID character(20), KEY INT, PARENT INT);
+create table GARR(GROUPID character(15) PRIMARY KEY NOT NULL, LEDGCODE character(2) NOT NULL, BEGACCT character(10) NOT NULL, ENDACCT character(10) NOT NULL);
+
+.mode csv
+.import C:/Users/RFrench/Desktop/PDF/GACC.csv GACC
+
+
+conn_str = (
+     r'DRIVER={SQL Server};'
+     r'SERVER=' + ServerInput + ';'
+     r'Trusted_Connection=Yes;'
+     r'DATABASE=' + DatabaseInput + ';'
+)
