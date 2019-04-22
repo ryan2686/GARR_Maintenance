@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Org Chart Editor</title>
+  <meta name="description" content="An organization chart editor -- edit details and change relationships." />
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- Copyright 1998-2019 by Northwoods Software Corporation. -->
+
+  
+  <script src="https://unpkg.com/gojs/release/go.js"></script> 
+  
+   <link rel="stylesheet" href="../dataInspector.css" /> 
+  <script src="../dataInspector.js"></script>
+
+  <script id="code">
+    function init() {
+      if (window.goSamples) goSamples();  // init for these samples -- you don't need to call this
+      var $ = go.GraphObject.make;  // for conciseness in defining templates
+      myDiagram =
+        $(go.Diagram, "myDiagramDiv", // must be the ID or reference to div
+          {
+            maxSelectionCount: 1, // users can select only one part at a time
+            validCycle: go.Diagram.CycleDestinationTree, // make sure users can only create trees
+            "clickCreatingTool.archetypeNodeData": { // allow double-click in background to create a new node
+              AcctName: "(new person)",
+              AcctNum: "",
+              comments: ""
+            },
+            "clickCreatingTool.insertPart": function(loc) {  // scroll to the new node
+              var node = go.ClickCreatingTool.prototype.insertPart.call(this, loc);
+              if (node !== null) {
+                this.diagram.select(node);
+                this.diagram.commandHandler.scrollToPart(node);
+                this.diagram.commandHandler.editTextBlock(node.findObject("NAMETB"));
+              }
+              return node;
+            },
+            layout:
+              $(go.TreeLayout,
+                {
+                  treeStyle: go.TreeLayout.StyleLastParents,
+                  arrangement: go.TreeLayout.ArrangementHorizontal,
+                  // properties for most of the tree:
+                  angle: 90,
+                  layerSpacing: 35,
+                  // properties for the "last parents":
+                  alternateAngle: 90,
+                  alternateLayerSpacing: 35,
+                  alternateAlignment: go.TreeLayout.AlignmentBus,
+                  alternateNodeSpacing: 20
+                }),
+            "undoManager.isEnabled": true // enable undo & redo
+          });
+      // when the document is modified, add a "*" to the title and enable the "Save" button
+      myDiagram.addDiagramListener("Modified", function(e) {
+        var button = document.getElementById("SaveButton");
+        if (button) button.disabled = !myDiagram.isModified;
+        var idx = document.title.indexOf("*");
+        if (myDiagram.isModified) {
+          if (idx < 0) document.title += "*";
+        } else {
+          if (idx >= 0) document.title = document.title.substr(0, idx);
+        }
+      });
+      // manage Parent info manually when a node or link is deleted from the diagram
+      myDiagram.addDiagramListener("SelectionDeleting", function(e) {
+        var part = e.subject.first(); // e.subject is the myDiagram.selection collection,
+        // so we'll get the first since we know we only have one selection
+        myDiagram.startTransaction("clear Parent");
+        if (part instanceof go.Node) {
+          var it = part.findTreeChildrenNodes(); // find all child nodes
+          while (it.next()) { // now iterate through them and clear out the Parent information
+            var child = it.value;
+            var ParentText = child.findObject("parent"); // since the Parent TextBlock is named, we can access it by name
+            if (ParentText === null) return;
+            ParentText.text = "";
+          }
+        } else if (part instanceof go.Link) {
+          var child = part.toNode;
+          var ParentText = child.findObject("parent"); // since the Parent TextBlock is named, we can access it by name
+          if (ParentText === null) return;
+          ParentText.text = "";
+        }
+        myDiagram.commitTransaction("clear Parent");
+      });
+      var levelColors = ["#AC193D", "#2672EC", "#8C0095", "#5133AB",
+        "#008299", "#D24726", "#008A00", "#094AB2"];
+      // override TreeLayout.commitNodes to also modify the background brush based on the tree depth level
+      myDiagram.layout.commitNodes = function() {
+        go.TreeLayout.prototype.commitNodes.call(myDiagram.layout);  // do the standard behavior
+        // then go through all of the vertexes and set their corresponding node's Shape.fill
+        // to a brush dependent on the TreeVertex.level value
+        myDiagram.layout.network.vertexes.each(function(v) {
+          if (v.node) {
+            var level = v.level % (levelColors.length);
+            var color = levelColors[level];
+            var shape = v.node.findObject("SHAPE");
+            if (shape) shape.fill = $(go.Brush, "Linear", { 0: color, 1: go.Brush.lightenBy(color, 0.05), start: go.Spot.Left, end: go.Spot.Right });
+          }
+        });
+      };
+      // when a node is double-clicked, add a child to it
+      function nodeDoubleClick(e, obj) {
+        var clicked = obj.part;
+        if (clicked !== null) {
+          var thisemp = clicked.data;
+          myDiagram.startTransaction("add employee");
+          var newemp = {
+            AcctName: "(new AcctName)",
+            AcctNum: "(new AcctNum)",
+            comments: "",
+            parent: thisemp.key
+          };
+          myDiagram.model.addNodeData(newemp);
+          myDiagram.commitTransaction("add employee");
+        }
+      }
+      // this is used to determine feedback during drags
+      function mayWorkFor(node1, node2) {
+        if (!(node1 instanceof go.Node)) return false;  // must be a Node
+        if (node1 === node2) return false;  // cannot work for yourself
+        if (node2.isInTreeOf(node1)) return false;  // cannot work for someone who works for you
+        return true;
+      }
+      // This function provides a common style for most of the TextBlocks.
+      // Some of these values may be overridden in a particular TextBlock.
+      function textStyle() {
+        return { font: "9pt  Segoe UI,sans-serif", stroke: "white" };
+      }
+      // This converter is used by the Picture.
+      function findHeadShot(key) {
+        if (key < 0 || key > 16) return "images/HSnopic.png"; // There are only 16 images on the server
+        return "images/HS" + key + ".png"
+      }
+      // define the Node template
+      myDiagram.nodeTemplate =
+        $(go.Node, "Auto",
+          { doubleClick: nodeDoubleClick },
+          { // handle dragging a Node onto a Node to (maybe) change the reporting relationship
+            mouseDragEnter: function(e, node, prev) {
+              var diagram = node.diagram;
+              var selnode = diagram.selection.first();
+              if (!mayWorkFor(selnode, node)) return;
+              var shape = node.findObject("SHAPE");
+              if (shape) {
+                shape._prevFill = shape.fill;  // remember the original brush
+                shape.fill = "darkred";
+              }
+            },
+            mouseDragLeave: function(e, node, next) {
+              var shape = node.findObject("SHAPE");
+              if (shape && shape._prevFill) {
+                shape.fill = shape._prevFill;  // restore the original brush
+              }
+            },
+            mouseDrop: function(e, node) {
+              var diagram = node.diagram;
+              var selnode = diagram.selection.first();  // assume just one Node in selection
+              if (mayWorkFor(selnode, node)) {
+                // find any existing link into the selected node
+                var link = selnode.findTreeParentLink();
+                if (link !== null) {  // reconnect any existing link
+                  link.fromNode = node;
+                } else {  // else create a new link
+                  diagram.toolManager.linkingTool.insertLink(node, node.port, selnode, selnode.port);
+                }
+              }
+            }
+          },
+          // for sorting, have the Node.text be the data.name
+          new go.Binding("text", "name"),
+          // bind the Part.layerName to control the Node's layer depending on whether it isSelected
+          new go.Binding("layerName", "isSelected", function(sel) { return sel ? "Foreground" : ""; }).ofObject(),
+          // define the node's outer shape
+          $(go.Shape, "Rectangle",
+            {
+              name: "SHAPE", fill: "white", stroke: null,
+              // set the port properties:
+              portId: "", fromLinkable: true, toLinkable: true, cursor: "pointer"
+            }),
+          $(go.Panel, "Horizontal",
+            // define the panel where the text will appear
+            $(go.Panel, "Table",
+              {
+                maxSize: new go.Size(150, 999),
+                margin: new go.Margin(6, 10, 0, 3),
+                defaultAlignment: go.Spot.Left
+              },
+              $(go.RowColumnDefinition, { column: 2, width: 4 }),
+              $(go.TextBlock, textStyle(),  // the name
+                {
+                  row: 0, column: 0, columnSpan: 5,
+                  font: "12pt Segoe UI,sans-serif",
+                  editable: true, isMultiline: false,
+                  minSize: new go.Size(10, 16)
+                },
+                new go.Binding("text", "AcctName").makeTwoWay()),
+              $(go.TextBlock, "AcctNum: ", textStyle(),
+                { row: 1, column: 0 }),
+              $(go.TextBlock, textStyle(),
+                {
+                  row: 1, column: 1, columnSpan: 4,
+                  editable: true, isMultiline: false,
+                  minSize: new go.Size(10, 14),
+                  margin: new go.Margin(0, 0, 0, 3)
+                },
+                new go.Binding("text", "AcctNum").makeTwoWay()),
+              $(go.TextBlock, textStyle(),
+                { row: 2, column: 0 },
+                new go.Binding("text", "key", function(v) { return "ID: " + v; })),
+              $(go.TextBlock, textStyle(),
+                { name: "parent", row: 2, column: 3, }, // we include a name so we can access this TextBlock when deleting Nodes/Links
+                new go.Binding("text", "parent", function(v) { return "Parent: " + v; })),
+              $(go.TextBlock, textStyle(),  // the comments
+                {
+                  row: 3, column: 0, columnSpan: 5,
+                  font: "italic 9pt sans-serif",
+                  wrap: go.TextBlock.WrapFit,
+                  editable: true,  // by default newlines are allowed
+                  minSize: new go.Size(10, 14)
+                },
+                new go.Binding("text", "comments").makeTwoWay())
+            )  // end Table Panel
+          ) // end Horizontal Panel
+        );  // end Node
+      // the context menu allows users to make a position vacant,
+      // remove a role and reassign the subtree, or remove a department
+      myDiagram.nodeTemplate.contextMenu =
+        $("ContextMenu",
+          $("ContextMenuButton",
+            $(go.TextBlock, "Vacate Position"),
+            {
+              click: function(e, obj) {
+                var node = obj.part.adornedPart;
+                if (node !== null) {
+                  var thisemp = node.data;
+                  myDiagram.startTransaction("vacate");
+                  // update the key, name, and comments
+                  myDiagram.model.setDataProperty(thisemp, "AcctName", "Empty");
+                  myDiagram.model.setDataProperty(thisemp, "comments", "");
+                  myDiagram.commitTransaction("vacate");
+                }
+              }
+            }
+          ),
+          $("ContextMenuButton",
+            $(go.TextBlock, "Remove Role"),
+            {
+              click: function(e, obj) {
+                // reparent the subtree to this node's Parent, then remove the node
+                var node = obj.part.adornedPart;
+                if (node !== null) {
+                  myDiagram.startTransaction("reparent remove");
+                  var chl = node.findTreeChildrenNodes();
+                  // iterate through the children and set their parent key to our selected node's parent key
+                  while (chl.next()) {
+                    var emp = chl.value;
+                    myDiagram.model.setParentKeyForNodeData(emp.data, node.findTreeParentNode().data.key);
+                  }
+                  // and now remove the selected node itself
+                  myDiagram.model.removeNodeData(node.data);
+                  myDiagram.commitTransaction("reparent remove");
+                }
+              }
+            }
+          ),
+          $("ContextMenuButton",
+            $(go.TextBlock, "Remove Department"),
+            {
+              click: function(e, obj) {
+                // remove the whole subtree, including the node itself
+                var node = obj.part.adornedPart;
+                if (node !== null) {
+                  myDiagram.startTransaction("remove dept");
+                  myDiagram.removeParts(node.findTreeParts());
+                  myDiagram.commitTransaction("remove dept");
+                }
+              }
+            }
+          )
+        );
+      // define the Link template
+      myDiagram.linkTemplate =
+        $(go.Link, go.Link.Orthogonal,
+          { corner: 5, relinkableFrom: true, relinkableTo: true },
+          $(go.Shape, { strokeWidth: 4, stroke: "#00a4a4" }));  // the link shape
+      // read in the JSON-format data from the "mySavedModel" element
+      load();
+      // support editing the properties of the selected person in HTML
+      if (window.Inspector) myInspector = new Inspector("myInspector", myDiagram,
+        {
+          properties: {
+            "key": { readOnly: true },
+            "comments": {}
+          }
+        });
+    }
+    // Show the diagram's model in JSON format
+    function save() {
+      document.getElementById("mySavedModel").value = myDiagram.model.toJson();
+      myDiagram.isModified = false;
+    }
+    function load() {
+      myDiagram.model = go.Model.fromJson(document.getElementById("mySavedModel").value);
+      // make sure new data keys are unique positive integers
+      var lastkey = 1;
+      myDiagram.model.makeUniqueKeyFunction = function(model, data) {
+        var k = data.key || lastkey;
+        while (model.findNodeDataForKey(k)) k++;
+        data.key = lastkey = k;
+        return k;
+      };
+    }
+  </script>
+</head>
+<body onload="init()">
+<div id="sample">
+  <div id="myDiagramDiv" style="background-color: #696969; border: solid 1px black; height: 500px"></div>
+  <div>
+    <div id="myInspector">
+
+    </div>
+  </div>
+  <p>
+    This editable organizational chart sample color-codes the Nodes according to the tree level in the hierarchy.
+  </p>
+  <p>
+    Double click on a node in order to add a person or the diagram background to add a new Parent. Double clicking the diagram uses the <a>ClickCreatingTool</a>
+    with a custom <a>ClickCreatingTool.insertPart</a> to scroll to the new node and start editing the <a>TextBlock</a> for its name .
+  </p>
+  <p>
+    Drag a node onto another in order to change relationships.
+    You can also draw a link from a node's background to other nodes that have no "Parent". Links can also be relinked to change relationships.
+    Right-click or tap-hold a Node to bring up a context menu which allows you to:
+    <ul>
+      <li>Vacate Position - remove the information specfic to the current person in that role</li>
+      <li>Remove Role - removes the role entirely and reparents any children</li>
+      <li>Remove Department - removes the role and the whole subtree</li>
+    </ul>
+    Deleting a Node or Link will orphan the child Nodes and generate a new tree. A custom SelectionDeleting <a>DiagramEvent</a> listener will clear out the Parent info
+    when the parent is removed.
+  </p>
+  <p>
+    Select a node to edit/update node data values. This sample uses the <a href="../extensions/dataInspector.html">Data Inspector</a> extension to display and modify Part data.
+  </p>
+  <p>
+    To learn how to build an org chart from scratch with GoJS, see the <a href="../learn/index.html">Getting Started tutorial</a>.
+  </p>
+  <p>
+    If you want to have some "assistant" nodes on the side, above the regular reports,
+    see the <a href="orgChartAssistants.html">Org Chart Assistants</a> sample, which is a copy of this sample
+    that uses a custom <a>TreeLayout</a> to position "assistants" that way.
+  </p>
+  <div>
+    <div>
+      <button id="SaveButton" onclick="save()">Save</button>
+      <button onclick="load()">Load</button>
+      Diagram Model saved in JSON format:
+    </div>
+    <textarea id="mySavedModel" style="width:100%;height:250px">
+{ "class": "go.TreeModel",
+  "nodeDataArray": [
+{"AcctNum":"BK1000000","AcctName":"CASH","key":"1","parent":""},{"AcctNum":"BK1001000","AcctName":"Petty Cash","key":"2","parent":""},{"AcctNum":"BK1002000","AcctName":"Operating Accounts","key":"3","parent":""},{"AcctNum":"BK1002100","AcctName":"Cash Clearing Account","key":"4","parent":""},{"AcctNum":"BK1003000","AcctName":"Disbursement Accounts","key":"5","parent":""},{"AcctNum":"BK1004000","AcctName":"Money Market Accounts","key":"6","parent":""},{"AcctNum":"BK1005000","AcctName":"Escrow Deposits","key":"7","parent":""},{"AcctNum":"BK1006000","AcctName":"Security Deposit Reserve","key":"8","parent":""},{"AcctNum":"BK1007000","AcctName":"Other Operating Deposits","key":"9","parent":""},{"AcctNum":"BK1008000","AcctName":"Capital Replacement Reserve","key":"10","parent":""},{"AcctNum":"BK1050000","AcctName":"CASH-FUND","key":"11","parent":""},{"AcctNum":"BK1051100","AcctName":"Operating Accounts - Fund","key":"12","parent":""},{"AcctNum":"BK1052100","AcctName":"Money Market Accounts - Fund","key":"13","parent":""},{"AcctNum":"BK1053100","AcctName":"Trust Account - Fund","key":"14","parent":""},{"AcctNum":"BK1054100","AcctName":"Escrow Deposits - Fund","key":"15","parent":""},{"AcctNum":"BK1100000","AcctName":"ACCOUNTS RECEIVABLE","key":"16","parent":""},{"AcctNum":"BK1101000","AcctName":"A\/R Base Rent","key":"17","parent":""},{"AcctNum":"BK1102000","AcctName":"A\/R Pass-Throughs\/Escalations","key":"18","parent":""},{"AcctNum":"BK1103000","AcctName":"A\/R Pass-Throughs True Up","key":"19","parent":""},{"AcctNum":"BK1104000","AcctName":"A\/R Unbilled Reimbursements","key":"20","parent":""},{"AcctNum":"BK1105000","AcctName":"A\/R Tenant Service Income","key":"21","parent":""},{"AcctNum":"BK1106000","AcctName":"A\/R Sales Tax","key":"22","parent":""},{"AcctNum":"BK1107200","AcctName":"A\/R Overage\/Percentage","key":"23","parent":""},{"AcctNum":"BK1108000","AcctName":"A\/R Other Rent","key":"24","parent":""},{"AcctNum":"BK1109000","AcctName":"A\/R Tenant Improvements","key":"25","parent":""},{"AcctNum":"BK1110000","AcctName":"A\/R Tenant TI Overage","key":"26","parent":""},{"AcctNum":"BK1111000","AcctName":"A\/R - Straight Line","key":"27","parent":""},{"AcctNum":"BK1112000","AcctName":"A\/R Allowance for Doubtful Accounts","key":"28","parent":""},{"AcctNum":"BK1113000","AcctName":"A\/R Escrow","key":"29","parent":""},{"AcctNum":"BK1114000","AcctName":"A\/R Interest","key":"30","parent":""},{"AcctNum":"BK1115000","AcctName":"A\/R Real Estate Notes","key":"31","parent":""},{"AcctNum":"BK1116000","AcctName":"A\/R Intercompany","key":"32","parent":""},{"AcctNum":"BK1117000","AcctName":"A\/R Other","key":"33","parent":""},{"AcctNum":"BK1118000","AcctName":"A\/R Unamortized Bill Back","key":"34","parent":""},{"AcctNum":"BK1119000","AcctName":"A\/R Casualty Claims","key":"35","parent":""},{"AcctNum":"BK1150000","AcctName":"ACCOUNTS RECEIVABLE-FUND","key":"36","parent":""},{"AcctNum":"BK1151100","AcctName":"A\/R Escrow - Fund","key":"37","parent":""},{"AcctNum":"BK1152100","AcctName":"A\/R Interest - Fund","key":"38","parent":""},{"AcctNum":"BK1153100","AcctName":"A\/R Real Estate Notes - Fund","key":"39","parent":""},{"AcctNum":"BK1154100","AcctName":"A\/R Intercompany - Fund","key":"40","parent":""},{"AcctNum":"BK1155100","AcctName":"A\/R Joint Venture - Fund","key":"41","parent":""},{"AcctNum":"BK1156100","AcctName":"A\/R Other-Fund","key":"42","parent":""},{"AcctNum":"BK1157100","AcctName":"A\/R Investor Receivable - Fund","key":"43","parent":""},{"AcctNum":"BK1158100","AcctName":"A\/R Casualty Claims - Fund","key":"44","parent":""},{"AcctNum":"BK1300000","AcctName":"PREPAID EXPENSES","key":"45","parent":""},{"AcctNum":"BK1301000","AcctName":"Prepaid Insurance","key":"46","parent":""},{"AcctNum":"BK1302000","AcctName":"Prepaid RE Taxes","key":"47","parent":""},{"AcctNum":"BK1303000","AcctName":"Prepaid Ground Rent","key":"48","parent":""},{"AcctNum":"BK1304000","AcctName":"Prepaid Interest Expense","key":"49","parent":""},{"AcctNum":"BK1305000","AcctName":"Prepaid Other","key":"50","parent":""},{"AcctNum":"BK1350000","AcctName":"PREPAID EXPENSES","key":"51","parent":""},{"AcctNum":"BK1351100","AcctName":"Prepaid Withholdings - Fund","key":"52","parent":""},{"AcctNum":"BK1400000","AcctName":"WORK IN PROGRESS","key":"53","parent":""},{"AcctNum":"BK1401000","AcctName":"Building Hard Cost - CIP","key":"54","parent":""},{"AcctNum":"BK1402000","AcctName":"Building Soft Cost - CIP","key":"55","parent":""},{"AcctNum":"BK1403000","AcctName":"Tenant Related - CIP","key":"56","parent":""},{"AcctNum":"BK1404000","AcctName":"Leasing Cost - CIP","key":"57","parent":""},{"AcctNum":"BK1405000","AcctName":"Furniture and Fixtures - CIP","key":"58","parent":""},{"AcctNum":"BK1406000","AcctName":"Other - CIP","key":"59","parent":""},{"AcctNum":"BK1430000","AcctName":"LAND","key":"60","parent":""},{"AcctNum":"BK1431000","AcctName":"Land","key":"61","parent":""},{"AcctNum":"BK1500000","AcctName":"STRUCTURES","key":"62","parent":""},{"AcctNum":"BK1501000","AcctName":"Building - Hard Cost","key":"63","parent":""},{"AcctNum":"BK1502000","AcctName":"Building - Soft Cost","key":"64","parent":""},{"AcctNum":"BK1503000","AcctName":"Retainage","key":"65","parent":""},{"AcctNum":"BK1504000","AcctName":"Acquisition Fees","key":"66","parent":""},{"AcctNum":"BK1505000","AcctName":"Legal Cost","key":"67","parent":""},{"AcctNum":"BK1506000","AcctName":"Building Improvements (second generation)","key":"68","parent":""},{"AcctNum":"BK1507000","AcctName":"Tenant Improvement (first generation)","key":"69","parent":""},{"AcctNum":"BK1508000","AcctName":"Tenant Improvements (second generation)","key":"70","parent":""},{"AcctNum":"BK1509000","AcctName":"UNIT UPGRADES & REPLACEMENTS","key":"71","parent":""},{"AcctNum":"BK1509300","AcctName":"Unit Upgrades","key":"72","parent":""},{"AcctNum":"BK1509400","AcctName":"Unit Replacements","key":"73","parent":""},{"AcctNum":"BK1510000","AcctName":"Leasing Costs (first generation)","key":"74","parent":""},{"AcctNum":"BK1511000","AcctName":"Leasing Costs (second generation)","key":"75","parent":""},{"AcctNum":"BK1512000","AcctName":"Other Cost","key":"76","parent":""},{"AcctNum":"BK1513000","AcctName":"Casualty Capital Cost","key":"77","parent":""},{"AcctNum":"BK1514000","AcctName":"Disposition Cost Reversal","key":"78","parent":""},{"AcctNum":"BK1515000","AcctName":"Net Proceeds from Sales","key":"79","parent":""},{"AcctNum":"BK1600000","AcctName":"FURNITURE. FIXTURES. AND EQUIPMENT","key":"80","parent":""},{"AcctNum":"BK1601000","AcctName":"Automobiles and Motor Vehicles","key":"81","parent":""},{"AcctNum":"BK1602000","AcctName":"Electronic Data Processing","key":"82","parent":""},{"AcctNum":"BK1603000","AcctName":"Building Operating Equipment","key":"83","parent":""},{"AcctNum":"BK1604000","AcctName":"Furniture and Fixtures","key":"84","parent":""},{"AcctNum":"BK1630000","AcctName":"OTHER ASSETS","key":"85","parent":""},{"AcctNum":"BK1631000","AcctName":"Pre-Op Cost - RE Taxes","key":"86","parent":""},{"AcctNum":"BK1632000","AcctName":"Pre-Op Cost - Insurance","key":"87","parent":""},{"AcctNum":"BK1633000","AcctName":"Pre-Op Cost - Interest","key":"88","parent":""},{"AcctNum":"BK1634000","AcctName":"Pre-Op Cost - Other","key":"89","parent":""},{"AcctNum":"BK1635000","AcctName":"Derivative Contract Asset","key":"90","parent":""},{"AcctNum":"BK1636000","AcctName":"Other Assets","key":"91","parent":""},{"AcctNum":"BK1700000","AcctName":"ACCUMULATED  DEPRECIATION","key":"92","parent":""},{"AcctNum":"BK1701000","AcctName":"A\/D - Building","key":"93","parent":""},{"AcctNum":"BK1702000","AcctName":"A\/D - Leasehold Improvements","key":"94","parent":""},{"AcctNum":"BK1703000","AcctName":"A\/D - Building Improvements","key":"95","parent":""},{"AcctNum":"BK1704000","AcctName":"A\/D - Tenant Improvements","key":"96","parent":""},{"AcctNum":"BK1705000","AcctName":"A\/D - Leasing Costs","key":"97","parent":""},{"AcctNum":"BK1706000","AcctName":"A\/D - Automobiles and Motor Vehicles","key":"98","parent":""},{"AcctNum":"BK1707000","AcctName":"A\/D - Electronic Data Processing","key":"99","parent":""},{"AcctNum":"BK1708000","AcctName":"A\/D - Building Operating Equipment","key":"100","parent":""},{"AcctNum":"BK1709000","AcctName":"A\/D - Furniture and Fixtures","key":"101","parent":""},{"AcctNum":"BK1710000","AcctName":"A\/D - Other Assets","key":"102","parent":""},{"AcctNum":"BK1711300","AcctName":"A\/D - Unit Upgrades","key":"103","parent":""},{"AcctNum":"BK1750000","AcctName":"ACCUMULATED  DEPRECIATION-FUND","key":"104","parent":""},{"AcctNum":"BK1751100","AcctName":"Real Estate Appr\/Depr - Fund","key":"105","parent":""},{"AcctNum":"BK1752100","AcctName":"Real Estate Appr\/Depr - JV - Fund","key":"106","parent":""},{"AcctNum":"BK1800000","AcctName":"LONG-TERM INVESTMENTS","key":"107","parent":""},{"AcctNum":"BK1801000","AcctName":"Stocks","key":"108","parent":""},{"AcctNum":"BK1802000","AcctName":"Treasury Bonds","key":"109","parent":""},{"AcctNum":"BK1803000","AcctName":"Notes Receivable","key":"110","parent":""},{"AcctNum":"BK1850000","AcctName":"LONG-TERM INVESTMENTS-FUND","key":"111","parent":""},{"AcctNum":"BK1851100","AcctName":"Notes Receivable - Fund","key":"112","parent":""},{"AcctNum":"BK1852100","AcctName":"Notes Receivable Appr\/Depr - Fund","key":"113","parent":""},{"AcctNum":"BK1860000","AcctName":"DEFERRED CHARGES (NET)","key":"114","parent":""},{"AcctNum":"BK1861000","AcctName":"Rent Abatements","key":"115","parent":""},{"AcctNum":"BK1862000","AcctName":"Deferred Finance Fees","key":"116","parent":""},{"AcctNum":"BK1863000","AcctName":"Goodwill","key":"117","parent":""},{"AcctNum":"BK1864000","AcctName":"Other Deferred Charges","key":"118","parent":""},{"AcctNum":"BK1880000","AcctName":"DEFERRED CHARGES (NET)-FUND","key":"119","parent":""},{"AcctNum":"BK1881100","AcctName":"Deferred Tax Asset - Fund","key":"120","parent":""},{"AcctNum":"BK1990000","AcctName":"Investment in Subsidiary","key":"121","parent":""},{"AcctNum":"BK1990005","AcctName":"Investment in Real Estate","key":"122","parent":""},{"AcctNum":"BK1990100","AcctName":"Investment in Joint Venture","key":"123","parent":""},{"AcctNum":"BK1990200","AcctName":"Investment in corporation","key":"124","parent":""},{"AcctNum":"BK1995000","AcctName":"INVESTMENT IN ASSETS - JOINT Ventures","key":"125","parent":""},{"AcctNum":"BK1996000","AcctName":"JV Inv. Valuation Adj.","key":"126","parent":""},{"AcctNum":"BK2000000","AcctName":"PAYABLES","key":"127","parent":""},{"AcctNum":"BK2001000","AcctName":"Accounts Payable","key":"128","parent":""},{"AcctNum":"BK2002000","AcctName":"Accrued Expenses","key":"129","parent":""},{"AcctNum":"BK2003000","AcctName":"Accrued Interest Expense","key":"130","parent":""},{"AcctNum":"BK2004000","AcctName":"Sales Tax Payable","key":"131","parent":""},{"AcctNum":"BK2005000","AcctName":"Real Estate Tax Payable","key":"132","parent":""},{"AcctNum":"BK2006000","AcctName":"Insurance Payable","key":"133","parent":""},{"AcctNum":"BK2007000","AcctName":"Other Tax Payable","key":"134","parent":""},{"AcctNum":"BK2008000","AcctName":"Security Deposits Payable","key":"135","parent":""},{"AcctNum":"BK2009000","AcctName":"Other Deposits Payable","key":"136","parent":""},{"AcctNum":"BK2010000","AcctName":"Unearned Rent","key":"137","parent":""},{"AcctNum":"BK2011000","AcctName":"Retainage Payable","key":"138","parent":""},{"AcctNum":"BK2012000","AcctName":"Capital Expenditures Payable","key":"139","parent":""},{"AcctNum":"BK2013000","AcctName":"Casualty Capital Payable","key":"140","parent":""},{"AcctNum":"BK2014000","AcctName":"Accrued Acquisition Fee","key":"141","parent":""},{"AcctNum":"BK2015000","AcctName":"Accrued Developer Bonus","key":"142","parent":""},{"AcctNum":"BK2016000","AcctName":"Dividends Payable","key":"143","parent":""},{"AcctNum":"BK2017000","AcctName":"Dividends Payable - Class A","key":"144","parent":""},{"AcctNum":"BK2018000","AcctName":"Dividends Payable - Class B","key":"145","parent":""},{"AcctNum":"BK2019000","AcctName":"Dividends Payable - Class C","key":"146","parent":""},{"AcctNum":"BK2020000","AcctName":"Other Accruals","key":"147","parent":""},{"AcctNum":"BK2050000","AcctName":"PAYABLES-FUND","key":"148","parent":""},{"AcctNum":"BK2051100","AcctName":"Accounts Payable - Fund","key":"149","parent":""},{"AcctNum":"BK2052100","AcctName":"Accrued Expenses - Fund","key":"150","parent":""},{"AcctNum":"BK2053100","AcctName":"Accrued Interest Expense - Fund","key":"151","parent":""},{"AcctNum":"BK2054100","AcctName":"Accrued Interest Shareholder - Fund","key":"152","parent":""},{"AcctNum":"BK2055100","AcctName":"Other Tax Payable - Fund","key":"153","parent":""},{"AcctNum":"BK2056100","AcctName":"Audit\/Tax Fees Payable","key":"154","parent":""},{"AcctNum":"BK2057100","AcctName":"Appraisals\/Review Payable","key":"155","parent":""},{"AcctNum":"BK2058100","AcctName":"Derivative Contract Liability","key":"156","parent":""},{"AcctNum":"BK2059100","AcctName":"Accrued Advisory Fees - Fund","key":"157","parent":""},{"AcctNum":"BK2060100","AcctName":"Accrued Incentive Fees- Fund","key":"158","parent":""},{"AcctNum":"BK2061100","AcctName":"Deferred Tax Liability - Fund","key":"159","parent":""},{"AcctNum":"BK2062100","AcctName":"Dividend Payable - Fund","key":"160","parent":""},{"AcctNum":"BK2063100","AcctName":"Dividend Payable - Class A - Fund","key":"161","parent":""},{"AcctNum":"BK2064100","AcctName":"Dividend Payable - Class B - Fund","key":"162","parent":""},{"AcctNum":"BK2065100","AcctName":"Dividend Payable - Class C - Fund","key":"163","parent":""},{"AcctNum":"BK2066100","AcctName":"Intercompany Payable - Fund","key":"164","parent":""},{"AcctNum":"BK2067100","AcctName":"Other Accruals - Fund","key":"165","parent":""},{"AcctNum":"BK2200000","AcctName":"SHORT- TERM DEBT","key":"166","parent":""},{"AcctNum":"BK2201000","AcctName":"Bank Advances","key":"167","parent":""},{"AcctNum":"BK2250000","AcctName":"SHORT- TERM DEBT-FUND","key":"168","parent":""},{"AcctNum":"BK2251100","AcctName":"Bank Line of Credit-Fund","key":"169","parent":""},{"AcctNum":"BK2252100","AcctName":"LOC Appr\/Depr-Fund","key":"170","parent":""},{"AcctNum":"BK2500000","AcctName":"LONG-TERM DEBT","key":"171","parent":""},{"AcctNum":"BK2501000","AcctName":"Mortgages","key":"172","parent":""},{"AcctNum":"BK2502000","AcctName":"Mortgage Payments","key":"173","parent":""},{"AcctNum":"BK2503000","AcctName":"Notes Payable","key":"174","parent":""},{"AcctNum":"BK2504000","AcctName":"Notes Payable Payments","key":"175","parent":""},{"AcctNum":"BK2505000","AcctName":"Bonds Payable","key":"176","parent":""},{"AcctNum":"BK2506000","AcctName":"Contingent Liabilities","key":"177","parent":""},{"AcctNum":"BK2550000","AcctName":"LONG-TERM DEBT-FUND","key":"178","parent":""},{"AcctNum":"BK2551100","AcctName":"Mortgages Appr\/Depr-Fund","key":"179","parent":""},{"AcctNum":"BK2552100","AcctName":"Notes Payable - Fund","key":"180","parent":""},{"AcctNum":"BK2553100","AcctName":"Notes Payable Pmt - Fund","key":"181","parent":""},{"AcctNum":"BK2554100","AcctName":"Notes Payable Appr\/Depr-Fund","key":"182","parent":""},{"AcctNum":"BK3000000","AcctName":"PAID-IN CAPITAL","key":"183","parent":""},{"AcctNum":"BK3001100","AcctName":"Common Stock-Fund","key":"184","parent":""},{"AcctNum":"BK3002100","AcctName":"Preferred Stock-Fund","key":"185","parent":""},{"AcctNum":"BK3003100","AcctName":"Original Capital-Fund","key":"186","parent":""},{"AcctNum":"BK3004100","AcctName":"Additional Paid in Capital-Fund","key":"187","parent":""},{"AcctNum":"BK3005100","AcctName":"Return of Capital-Fund","key":"188","parent":""},{"AcctNum":"BK3100000","AcctName":"PARTNER CONTRIBUTIONS","key":"189","parent":""},{"AcctNum":"BK3101000","AcctName":"Class B Equity","key":"190","parent":""},{"AcctNum":"BK3102000","AcctName":"Class C Equity","key":"191","parent":""},{"AcctNum":"BK3103000","AcctName":"Contributions","key":"192","parent":""},{"AcctNum":"BK3104000","AcctName":"Contributions - Partner 1","key":"193","parent":""},{"AcctNum":"BK3105000","AcctName":"Contributions - Partner 2","key":"194","parent":""},{"AcctNum":"BK3106000","AcctName":"Contributions - Partner 3","key":"195","parent":""},{"AcctNum":"BK3107000","AcctName":"Distributions","key":"196","parent":""},{"AcctNum":"BK3108000","AcctName":"Distributions - Partner 1","key":"197","parent":""},{"AcctNum":"BK3109000","AcctName":"Distributions - Partner 2","key":"198","parent":""},{"AcctNum":"BK3110000","AcctName":"Distributions - Partner 3","key":"199","parent":""},{"AcctNum":"BK3111000","AcctName":"Distributions - Sales Proceeds","key":"200","parent":""},{"AcctNum":"BK3112000","AcctName":"Distributions - Financing Proceeds","key":"201","parent":""},{"AcctNum":"BK3113000","AcctName":"Non-Cash Contributions\/Distributions","key":"202","parent":""},{"AcctNum":"BK3200000","AcctName":"PARTNER CONTRIBUTIONS-FUND","key":"203","parent":""},{"AcctNum":"BK3201100","AcctName":"Minority Interest Income-Fund","key":"204","parent":""},{"AcctNum":"BK3202100","AcctName":"Minority Interest Apprec-Fund","key":"205","parent":""},{"AcctNum":"BK3203100","AcctName":"Minority Off set-Fund","key":"206","parent":""},{"AcctNum":"BK3204100","AcctName":"Shares Purchased-Fund","key":"207","parent":""},{"AcctNum":"BK3205100","AcctName":"Shares Redeemed-Fund","key":"208","parent":""},{"AcctNum":"BK3206100","AcctName":"Dividend Distributions","key":"209","parent":""},{"AcctNum":"BK3300000","AcctName":"RETAINED EARNINGS","key":"210","parent":""},{"AcctNum":"BK3301000","AcctName":"Current Earnings","key":"211","parent":""},{"AcctNum":"BK3302000","AcctName":"Retained Earnings","key":"212","parent":""},{"AcctNum":"BK3400000","AcctName":"Offset Account","key":"213","parent":""},{"AcctNum":"BK4000000","AcctName":"COMMERCIAL\/INDUSTRIAL INCOME","key":"214","parent":""},{"AcctNum":"BK4000005","AcctName":"Inc\/loss from inv in RE","key":"215","parent":""},{"AcctNum":"BK4001000","AcctName":"Base Rent - Commercial","key":"216","parent":""},{"AcctNum":"BK4002000","AcctName":"Gross Potential - Commercial","key":"217","parent":""},{"AcctNum":"BK4003000","AcctName":"Master Lease Income","key":"218","parent":""},{"AcctNum":"BK4004000","AcctName":"Straight-line Rents","key":"219","parent":""},{"AcctNum":"BK4005000","AcctName":"Vacancy Loss","key":"220","parent":""},{"AcctNum":"BK4006000","AcctName":"Deferred Rent","key":"221","parent":""},{"AcctNum":"BK4007000","AcctName":"Operating Expenses Reimbursements","key":"222","parent":""},{"AcctNum":"BK4008000","AcctName":"Real Estate Taxes Reimbursements","key":"223","parent":""},{"AcctNum":"BK4009000","AcctName":"Insurance Reimbursements","key":"224","parent":""},{"AcctNum":"BK4010000","AcctName":"Utility Direct Reimbursements","key":"225","parent":""},{"AcctNum":"BK4011000","AcctName":"PY Operating Expense Reimbursements","key":"226","parent":""},{"AcctNum":"BK4012000","AcctName":"Pass-Throughs True Up","key":"227","parent":""},{"AcctNum":"BK4013000","AcctName":"Amort Tenant Leasing Cost Reimb","key":"228","parent":""},{"AcctNum":"BK4014000","AcctName":"CPI Escalations","key":"229","parent":""},{"AcctNum":"BK4015000","AcctName":"Termination Fee Income","key":"230","parent":""},{"AcctNum":"BK4016000","AcctName":"Free Rent","key":"231","parent":""},{"AcctNum":"BK4017000","AcctName":"Parking Income - Tenant","key":"232","parent":""},{"AcctNum":"BK4018000","AcctName":"Parking Income - Operator","key":"233","parent":""},{"AcctNum":"BK4019000","AcctName":"Storage Space","key":"234","parent":""},{"AcctNum":"BK4020000","AcctName":"Antenna\/Satellite Dish Rental","key":"235","parent":""},{"AcctNum":"BK4021000","AcctName":"Other Telecommunication Space (Risers) Rental","key":"236","parent":""},{"AcctNum":"BK4022000","AcctName":"Meeting Facility Rental","key":"237","parent":""},{"AcctNum":"BK4023000","AcctName":"Other Space Rent","key":"238","parent":""},{"AcctNum":"BK4024000","AcctName":"Additional Tenant Service Income","key":"239","parent":""},{"AcctNum":"BK4025000","AcctName":"Miscellaneous Income","key":"240","parent":""},{"AcctNum":"BK4026000","AcctName":"Vending Machines","key":"241","parent":""},{"AcctNum":"BK4027000","AcctName":"Late Charges\/NSF Fees","key":"242","parent":""},{"AcctNum":"BK4028000","AcctName":"Security Deposit Forfeiture","key":"243","parent":""},{"AcctNum":"BK4029000","AcctName":"lnterest lncome","key":"244","parent":""},{"AcctNum":"BK4030000","AcctName":"Notes Receivable Income","key":"245","parent":""},{"AcctNum":"BK4031000","AcctName":"Less: Uncollectible Accounts","key":"246","parent":""},{"AcctNum":"BK4050000","AcctName":"COMMERCIAL\/INDUSTRIAL INCOME-FUND","key":"247","parent":""},{"AcctNum":"BK4051100","AcctName":"Interest Income - Fund","key":"248","parent":""},{"AcctNum":"BK4052100","AcctName":"Notes Receivable Income - Fund","key":"249","parent":""},{"AcctNum":"BK4200200","AcctName":"RETAIL INCOME","key":"250","parent":""},{"AcctNum":"BK4201200","AcctName":"Percentage Rent - Gross","key":"251","parent":""},{"AcctNum":"BK4202200","AcctName":"Percentage Rent - Net","key":"252","parent":""},{"AcctNum":"BK4203200","AcctName":"Merchant Association Dues\/Fees Income","key":"253","parent":""},{"AcctNum":"BK4204200","AcctName":"Marketing Income","key":"254","parent":""},{"AcctNum":"BK4205200","AcctName":"Temporary Tenant Income","key":"255","parent":""},{"AcctNum":"BK4206200","AcctName":"Kiosk & Cart Income","key":"256","parent":""},{"AcctNum":"BK4207200","AcctName":"Commercial Vacancy Loss","key":"257","parent":""},{"AcctNum":"BK4208200","AcctName":"Other Commercial Income","key":"258","parent":""},{"AcctNum":"BK4500300","AcctName":"MULTI-FAMILY INCOME","key":"259","parent":""},{"AcctNum":"BK4501300","AcctName":"Market Rent","key":"260","parent":""},{"AcctNum":"BK4502300","AcctName":"Subsidized Rent","key":"261","parent":""},{"AcctNum":"BK4503300","AcctName":"Loss To Lease","key":"262","parent":""},{"AcctNum":"BK4504300","AcctName":"Model Unit","key":"263","parent":""},{"AcctNum":"BK4505300","AcctName":"Guest Suite","key":"264","parent":""},{"AcctNum":"BK4506300","AcctName":"Employee Concession","key":"265","parent":""},{"AcctNum":"BK4507300","AcctName":"Concessions","key":"266","parent":""},{"AcctNum":"BK4508300","AcctName":"Move Out Charges","key":"267","parent":""},{"AcctNum":"BK4509300","AcctName":"Move In Charges","key":"268","parent":""},{"AcctNum":"BK4510300","AcctName":"Cash Received-Collections","key":"269","parent":""},{"AcctNum":"BK4511300","AcctName":"Converted Apt-Non-Revenue","key":"270","parent":""},{"AcctNum":"BK4512300","AcctName":"Laundry Income","key":"271","parent":""},{"AcctNum":"BK4513300","AcctName":"Month-to-Month Fees","key":"272","parent":""},{"AcctNum":"BK4514300","AcctName":"Late Rent Fees","key":"273","parent":""},{"AcctNum":"BK4515300","AcctName":"Application Fees","key":"274","parent":""},{"AcctNum":"BK4516300","AcctName":"NSF Fees","key":"275","parent":""},{"AcctNum":"BK4517300","AcctName":"Court Fee Reimbursements","key":"276","parent":""},{"AcctNum":"BK4518300","AcctName":"Monthly Pet Rent","key":"277","parent":""},{"AcctNum":"BK4519300","AcctName":"Charges To Residents","key":"278","parent":""},{"AcctNum":"BK4520300","AcctName":"Amenity Rental Income","key":"279","parent":""},{"AcctNum":"BK4521300","AcctName":"Lease Termination Fees","key":"280","parent":""},{"AcctNum":"BK4522300","AcctName":"Transfer Fees","key":"281","parent":""},{"AcctNum":"BK4523300","AcctName":"Association Dues","key":"282","parent":""},{"AcctNum":"BK4524300","AcctName":"SD Interest Income","key":"283","parent":""},{"AcctNum":"BK4525300","AcctName":"Utility Rebill Service Reimb","key":"284","parent":""},{"AcctNum":"BK4526300","AcctName":"Water\/Sewer Reimbursement","key":"285","parent":""},{"AcctNum":"BK4527300","AcctName":"Electricity Reimbursement","key":"286","parent":""},{"AcctNum":"BK4528300","AcctName":"Gas Reimbursement","key":"287","parent":""},{"AcctNum":"BK4529300","AcctName":"Other Utility Reimbursements","key":"288","parent":""},{"AcctNum":"BK4530300","AcctName":"Valet Trash Reimbursement","key":"289","parent":""},{"AcctNum":"BK4531300","AcctName":"Trash Reimbursement","key":"290","parent":""},{"AcctNum":"BK4532300","AcctName":"Furniture Rental Income","key":"291","parent":""},{"AcctNum":"BK4533300","AcctName":"Pest Reimbursement","key":"292","parent":""},{"AcctNum":"BK4534300","AcctName":"Damages Income","key":"293","parent":""},{"AcctNum":"BK4535300","AcctName":"Cable\/Internet Income","key":"294","parent":""},{"AcctNum":"BK4536300","AcctName":"Keys\/Fobs Income","key":"295","parent":""},{"AcctNum":"BK4537300","AcctName":"Pet Application Fees","key":"296","parent":""},{"AcctNum":"BK4538300","AcctName":"Renewable Energy Credits","key":"297","parent":""},{"AcctNum":"BK4539300","AcctName":"Referral Fee Income","key":"298","parent":""},{"AcctNum":"BK4540300","AcctName":"Amenity Charge","key":"299","parent":""},{"AcctNum":"BK4541300","AcctName":"Administration Fee Income","key":"300","parent":""},{"AcctNum":"BK4542300","AcctName":"Misc Concessions","key":"301","parent":""},{"AcctNum":"BK4543300","AcctName":"Guest Suite Revenue","key":"302","parent":""},{"AcctNum":"BK4600000","AcctName":"Joint Venture Income","key":"303","parent":""},{"AcctNum":"BK5000000","AcctName":"CLEANING EXPENSES","key":"304","parent":""},{"AcctNum":"BK5001000","AcctName":"Cleaning Contract","key":"305","parent":""},{"AcctNum":"BK5002000","AcctName":"Day Porter\/Matron","key":"306","parent":""},{"AcctNum":"BK5003000","AcctName":"Cleaning Supplies","key":"307","parent":""},{"AcctNum":"BK5004000","AcctName":"Window Cleaning","key":"308","parent":""},{"AcctNum":"BK5005000","AcctName":"Carpet Cleaning","key":"309","parent":""},{"AcctNum":"BK5006000","AcctName":"Uniforms\/Laundry","key":"310","parent":""},{"AcctNum":"BK5007300","AcctName":"Apartment Turnover Cleaning","key":"311","parent":""},{"AcctNum":"BK5008000","AcctName":"Special Surface Cleaning (polishing metal, br","key":"312","parent":""},{"AcctNum":"BK5009000","AcctName":"Emergency Clean-up (not covered by insurance)","key":"313","parent":""},{"AcctNum":"BK5010000","AcctName":"Other Specialized Service","key":"314","parent":""},{"AcctNum":"BK5011000","AcctName":"Trash Container Contract","key":"315","parent":""},{"AcctNum":"BK5012000","AcctName":"Trash Removal","key":"316","parent":""},{"AcctNum":"BK5013000","AcctName":"Other Cleaning","key":"317","parent":""},{"AcctNum":"BK5014000","AcctName":"Non-Recoverable Cleaning","key":"318","parent":""},{"AcctNum":"BK5100000","AcctName":"REPAIRS\/MAINTENANCE","key":"319","parent":""},{"AcctNum":"BK5101000","AcctName":"Repairs\/Maintenance Payroll","key":"320","parent":""},{"AcctNum":"BK5102000","AcctName":"Repairs\/Maintenance Payroll Benefits","key":"321","parent":""},{"AcctNum":"BK5103000","AcctName":"Elevator\/Escalator Contracts","key":"322","parent":""},{"AcctNum":"BK5104000","AcctName":"Elevator\/Escalator Supplies\/Materials\/Other","key":"323","parent":""},{"AcctNum":"BK5105000","AcctName":"HVAC General Service Contract","key":"324","parent":""},{"AcctNum":"BK5106000","AcctName":"HVAC Supplies\/Materials\/Miscellaneous","key":"325","parent":""},{"AcctNum":"BK5107000","AcctName":"Electrical Service Contracts","key":"326","parent":""},{"AcctNum":"BK5108000","AcctName":"Electrical Supplies\/Materials\/Miscellaneous","key":"327","parent":""},{"AcctNum":"BK5109000","AcctName":"Structural\/Roofing Contracts","key":"328","parent":""},{"AcctNum":"BK5110000","AcctName":"Structural\/Roofing Consultant Fees","key":"329","parent":""},{"AcctNum":"BK5111000","AcctName":"Structural\/Roofing Supplies\/Materials\/Miscell","key":"330","parent":""},{"AcctNum":"BK5112000","AcctName":"Window Repairs","key":"331","parent":""},{"AcctNum":"BK5113000","AcctName":"Plumbing Contracts","key":"332","parent":""},{"AcctNum":"BK5114000","AcctName":"Plumbing Supplies\/Materials\/Miscellaneous","key":"333","parent":""},{"AcctNum":"BK5115000","AcctName":"Fire and Life Safety Contracts","key":"334","parent":""},{"AcctNum":"BK5116000","AcctName":"Fire and Life Safety Supplies\/Materials\/Misce","key":"335","parent":""},{"AcctNum":"BK5117000","AcctName":"Pest Control Contracts","key":"336","parent":""},{"AcctNum":"BK5118000","AcctName":"Painting Interior","key":"337","parent":""},{"AcctNum":"BK5119000","AcctName":"Painting Exterior","key":"338","parent":""},{"AcctNum":"BK5120000","AcctName":"Carpet Repairs\/Maintenance","key":"339","parent":""},{"AcctNum":"BK5121000","AcctName":"Interior Plant Maintenance","key":"340","parent":""},{"AcctNum":"BK5122000","AcctName":"Sealing, Caulking, Repointing","key":"341","parent":""},{"AcctNum":"BK5123000","AcctName":"Licenses & Inspection Fees","key":"342","parent":""},{"AcctNum":"BK5124000","AcctName":"Signage\/Directory","key":"343","parent":""},{"AcctNum":"BK5125000","AcctName":"Environmental Costs","key":"344","parent":""},{"AcctNum":"BK5126000","AcctName":"General Repairs\/Maintenance","key":"345","parent":""},{"AcctNum":"BK5127000","AcctName":"General Supplies\/Materials\/Miscellaneous","key":"346","parent":""},{"AcctNum":"BK5128300","AcctName":"Apartment Turnover Repairs","key":"347","parent":""},{"AcctNum":"BK5129000","AcctName":"Sustainability Expenses","key":"348","parent":""},{"AcctNum":"BK5130000","AcctName":"Fuel Cell Contract","key":"349","parent":""},{"AcctNum":"BK5131000","AcctName":"Fitness Center Expense","key":"350","parent":""},{"AcctNum":"BK5132000","AcctName":"Conference Room Expense","key":"351","parent":""},{"AcctNum":"BK5133000","AcctName":"Non-Recoverable Repairs & Maintenance","key":"352","parent":""},{"AcctNum":"BK5134300","AcctName":"Appliance Repairs\/Supplies","key":"353","parent":""},{"AcctNum":"BK5135300","AcctName":"Pool Contracts","key":"354","parent":""},{"AcctNum":"BK5136300","AcctName":"Pool Repairs\/Supplies","key":"355","parent":""},{"AcctNum":"BK5137000","AcctName":"Casualty Expense","key":"356","parent":""},{"AcctNum":"BK5138300","AcctName":"Fitness Center Contract","key":"357","parent":""},{"AcctNum":"BK5139300","AcctName":"3rd Party Profit\/Overhead","key":"358","parent":""},{"AcctNum":"BK5140300","AcctName":"Building Automation Systems","key":"359","parent":""},{"AcctNum":"BK5141300","AcctName":"Equipment Rental","key":"360","parent":""},{"AcctNum":"BK5142300","AcctName":"Appliance Replacement","key":"361","parent":""},{"AcctNum":"BK5143300","AcctName":"HVAC Replacement","key":"362","parent":""},{"AcctNum":"BK5144300","AcctName":"Water Heater Replacement","key":"363","parent":""},{"AcctNum":"BK5145300","AcctName":"Apt Fixture\/Flr Replace","key":"364","parent":""},{"AcctNum":"BK5146300","AcctName":"Misc Replacement","key":"365","parent":""},{"AcctNum":"BK5147300","AcctName":"Other General Maintenance Contracts","key":"366","parent":""},{"AcctNum":"BK5148300","AcctName":"Guest Suite Expenses","key":"367","parent":""},{"AcctNum":"BK5149300","AcctName":"Turnover-Painting\/Drywall","key":"368","parent":""},{"AcctNum":"BK5300000","AcctName":"ROADS\/GROUNDS EXPENSES","key":"369","parent":""},{"AcctNum":"BK5301000","AcctName":"Landscaping Contract","key":"370","parent":""},{"AcctNum":"BK5302000","AcctName":"Tools\/Equipment (directly expensed)","key":"371","parent":""},{"AcctNum":"BK5303000","AcctName":"Sprinklers (outdoor)","key":"372","parent":""},{"AcctNum":"BK5304000","AcctName":"Landscaping Supplies\/Materials\/Miscellaneous","key":"373","parent":""},{"AcctNum":"BK5305000","AcctName":"Repairs\/Maintenance","key":"374","parent":""},{"AcctNum":"BK5306000","AcctName":"Garage\/Parking Lot","key":"375","parent":""},{"AcctNum":"BK5307000","AcctName":"Snow Removal Contract","key":"376","parent":""},{"AcctNum":"BK5308000","AcctName":"Other Grounds Expenses","key":"377","parent":""},{"AcctNum":"BK5309000","AcctName":"Vehicle Lease (e.g. golf cart)","key":"378","parent":""},{"AcctNum":"BK5310000","AcctName":"Master Lease Expense","key":"379","parent":""},{"AcctNum":"BK5311000","AcctName":"Non-Recoverable Roads\/Grounds","key":"380","parent":""},{"AcctNum":"BK5312300","AcctName":"Marina Contract","key":"381","parent":""},{"AcctNum":"BK5313300","AcctName":"Shuttle Contract","key":"382","parent":""},{"AcctNum":"BK5400000","AcctName":"SECURITY","key":"383","parent":""},{"AcctNum":"BK5401000","AcctName":"Security Contract","key":"384","parent":""},{"AcctNum":"BK5402000","AcctName":"Security Payroll","key":"385","parent":""},{"AcctNum":"BK5403000","AcctName":"Security Benefits","key":"386","parent":""},{"AcctNum":"BK5404000","AcctName":"Telephones","key":"387","parent":""},{"AcctNum":"BK5405000","AcctName":"Cameras","key":"388","parent":""},{"AcctNum":"BK5406000","AcctName":"Radio\/Cell Phone","key":"389","parent":""},{"AcctNum":"BK5407000","AcctName":"Equipment","key":"390","parent":""},{"AcctNum":"BK5408000","AcctName":"Other Security","key":"391","parent":""},{"AcctNum":"BK5409000","AcctName":"Access Gates Repairs","key":"392","parent":""},{"AcctNum":"BK5410000","AcctName":"Non-Recoverable Security","key":"393","parent":""},{"AcctNum":"BK5510000","AcctName":"UTILITIES","key":"394","parent":""},{"AcctNum":"BK5511000","AcctName":"Electricity","key":"395","parent":""},{"AcctNum":"BK5512000","AcctName":"Gas","key":"396","parent":""},{"AcctNum":"BK5513000","AcctName":"Steam","key":"397","parent":""},{"AcctNum":"BK5514000","AcctName":"Water\/Sewer","key":"398","parent":""},{"AcctNum":"BK5515300","AcctName":"Cable\/Internet","key":"399","parent":""},{"AcctNum":"BK5516000","AcctName":"Vacant Space Utilities","key":"400","parent":""},{"AcctNum":"BK5517000","AcctName":"Utilities Direct Billed","key":"401","parent":""},{"AcctNum":"BK5518000","AcctName":"Other Utilities","key":"402","parent":""},{"AcctNum":"BK5519000","AcctName":"Non-Recoverable Utilities","key":"403","parent":""},{"AcctNum":"BK5600000","AcctName":"MARKETING","key":"404","parent":""},{"AcctNum":"BK5601000","AcctName":"Leasing Furniture\/Equipment","key":"405","parent":""},{"AcctNum":"BK5602000","AcctName":"Consultant Fees","key":"406","parent":""},{"AcctNum":"BK5603000","AcctName":"Tenant Association Dues","key":"407","parent":""},{"AcctNum":"BK5604000","AcctName":"Tenant Relations","key":"408","parent":""},{"AcctNum":"BK5605000","AcctName":"Promotional Expenses","key":"409","parent":""},{"AcctNum":"BK5606000","AcctName":"Classified Ads","key":"410","parent":""},{"AcctNum":"BK5607000","AcctName":"Other Marketing","key":"411","parent":""},{"AcctNum":"BK5608300","AcctName":"Internet Advertising","key":"412","parent":""},{"AcctNum":"BK5609300","AcctName":"Website","key":"413","parent":""},{"AcctNum":"BK5610300","AcctName":"Resident Referrals","key":"414","parent":""},{"AcctNum":"BK5700000","AcctName":"MANAGEMENT FEES","key":"415","parent":""},{"AcctNum":"BK5701000","AcctName":"Management Fees","key":"416","parent":""},{"AcctNum":"BK5702000","AcctName":"Non-Recoverable Management Fees","key":"417","parent":""},{"AcctNum":"BK5800000","AcctName":"ADMINISTRATIVE","key":"418","parent":""},{"AcctNum":"BK5801000","AcctName":"Office Payroll","key":"419","parent":""},{"AcctNum":"BK5802000","AcctName":"Office Benefits Payroll","key":"420","parent":""},{"AcctNum":"BK5803000","AcctName":"Temporary Help","key":"421","parent":""},{"AcctNum":"BK5804300","AcctName":"Concierge Service","key":"422","parent":""},{"AcctNum":"BK5805000","AcctName":"Communications","key":"423","parent":""},{"AcctNum":"BK5806000","AcctName":"Computer Hardware\/Software","key":"424","parent":""},{"AcctNum":"BK5807000","AcctName":"Postage\/Courier","key":"425","parent":""},{"AcctNum":"BK5808000","AcctName":"Admin Supplies\/Materials\/Miscellaneous","key":"426","parent":""},{"AcctNum":"BK5809000","AcctName":"Dues\/Subscriptions","key":"427","parent":""},{"AcctNum":"BK5810000","AcctName":"Education (classes, conferences & seminars)","key":"428","parent":""},{"AcctNum":"BK5811000","AcctName":"Union Dues","key":"429","parent":""},{"AcctNum":"BK5812000","AcctName":"Bank Fees","key":"430","parent":""},{"AcctNum":"BK5813300","AcctName":"Credit Card Fees","key":"431","parent":""},{"AcctNum":"BK5814000","AcctName":"Travel\/Entertainment","key":"432","parent":""},{"AcctNum":"BK5815000","AcctName":"Mileage","key":"433","parent":""},{"AcctNum":"BK5816000","AcctName":"General Office Expense","key":"434","parent":""},{"AcctNum":"BK5817000","AcctName":"Space Planning","key":"435","parent":""},{"AcctNum":"BK5818000","AcctName":"Office Rent","key":"436","parent":""},{"AcctNum":"BK5819000","AcctName":"Licenses & Permits","key":"437","parent":""},{"AcctNum":"BK5820300","AcctName":"Commissions\/Bonus","key":"438","parent":""},{"AcctNum":"BK5821300","AcctName":"Brokers Fee","key":"439","parent":""},{"AcctNum":"BK5822000","AcctName":"Holiday Decorations","key":"440","parent":""},{"AcctNum":"BK5823000","AcctName":"Professional Fees","key":"441","parent":""},{"AcctNum":"BK5825000","AcctName":"Legal Fees","key":"442","parent":""},{"AcctNum":"BK5827000","AcctName":"Audit\/Tax Fees","key":"443","parent":""},{"AcctNum":"BK5829000","AcctName":"Income\/Franchise Tax","key":"444","parent":""},{"AcctNum":"BK5831000","AcctName":"Filing Fees","key":"445","parent":""},{"AcctNum":"BK5833000","AcctName":"Recruiting Fees","key":"446","parent":""},{"AcctNum":"BK5835300","AcctName":"Security Deposit Interest Expense","key":"447","parent":""},{"AcctNum":"BK5836000","AcctName":"Bad Debt Expense","key":"448","parent":""},{"AcctNum":"BK5837000","AcctName":"Ground Rent","key":"449","parent":""},{"AcctNum":"BK5838000","AcctName":"Other Administrative Expenses","key":"450","parent":""},{"AcctNum":"BK5839300","AcctName":"Answering Service","key":"451","parent":""},{"AcctNum":"BK5840300","AcctName":"Credit Bureau Services","key":"452","parent":""},{"AcctNum":"BK5841300","AcctName":"Other Perform Enhance Software","key":"453","parent":""},{"AcctNum":"BK5845000","AcctName":"Non-Recoverable Admin Expense","key":"454","parent":""},{"AcctNum":"BK5846000","AcctName":"Non-Recoverable Ground Rent","key":"455","parent":""},{"AcctNum":"BK5950000","AcctName":"ADMINISTRATIVE-FUND","key":"456","parent":""},{"AcctNum":"BK5951100","AcctName":"Professional Fees - Fund","key":"457","parent":""},{"AcctNum":"BK5952100","AcctName":"Legal Fees - Fund","key":"458","parent":""},{"AcctNum":"BK5953100","AcctName":"Audit Fees - Fund","key":"459","parent":""},{"AcctNum":"BK5954100","AcctName":"Income\/Franchise Tax - Fund","key":"460","parent":""},{"AcctNum":"BK5955100","AcctName":"Filing Fees - Fund","key":"461","parent":""},{"AcctNum":"BK5956100","AcctName":"Consultant Fees - Fund","key":"462","parent":""},{"AcctNum":"BK5957100","AcctName":"Other Administrative Expenses - Fund","key":"463","parent":""},{"AcctNum":"BK5958100","AcctName":"Financing Fees - Fund","key":"464","parent":""},{"AcctNum":"BK5959100","AcctName":"Dead Deal Costs - Fund","key":"465","parent":""},{"AcctNum":"BK5960100","AcctName":"Appraisal Fees - Fund","key":"466","parent":""},{"AcctNum":"BK5961100","AcctName":"Appraisal Review - Fund","key":"467","parent":""},{"AcctNum":"BK5962100","AcctName":"Trustee Fees - Fund","key":"468","parent":""},{"AcctNum":"BK5963100","AcctName":"Advisory Fees - Fund","key":"469","parent":""},{"AcctNum":"BK6500000","AcctName":"REAL ESTATE TAXES","key":"470","parent":""},{"AcctNum":"BK6501000","AcctName":"Real Estate Taxes","key":"471","parent":""},{"AcctNum":"BK6502000","AcctName":"Personal Property Taxes","key":"472","parent":""},{"AcctNum":"BK6503000","AcctName":"Special Assessments","key":"473","parent":""},{"AcctNum":"BK6504000","AcctName":"PY Real Estate Tax Adjustment","key":"474","parent":""},{"AcctNum":"BK6505000","AcctName":"Tax Consulting Fees","key":"475","parent":""},{"AcctNum":"BK6506000","AcctName":"Non-Recoverable Taxes","key":"476","parent":""},{"AcctNum":"BK7000000","AcctName":"INSURANCE","key":"477","parent":""},{"AcctNum":"BK7005000","AcctName":"Property Liability","key":"478","parent":""},{"AcctNum":"BK7010000","AcctName":"General Liability","key":"479","parent":""},{"AcctNum":"BK7015000","AcctName":"Other Insurance","key":"480","parent":""},{"AcctNum":"BK7020000","AcctName":"Non-Recoverable Insurance","key":"481","parent":""},{"AcctNum":"BK8000000","AcctName":"INTEREST EXPENSE","key":"482","parent":""},{"AcctNum":"BK8001000","AcctName":"Interest Expense - Property","key":"483","parent":""},{"AcctNum":"BK8002000","AcctName":"Financing Fees","key":"484","parent":""},{"AcctNum":"BK8050000","AcctName":"INTEREST EXPENSE-FUND","key":"485","parent":""},{"AcctNum":"BK8051100","AcctName":"Interest Expense - Fund","key":"486","parent":""},{"AcctNum":"BK8052100","AcctName":"Interest Expense Shareholder - Fund","key":"487","parent":""},{"AcctNum":"BK9000000","AcctName":"OTHER","key":"488","parent":""},{"AcctNum":"BK9001000","AcctName":"Amortization Expense","key":"489","parent":""},{"AcctNum":"BK9002000","AcctName":"Depreciation Building\/TI Expense","key":"490","parent":""},{"AcctNum":"BK9003000","AcctName":"Depreciation FF&E Expense","key":"491","parent":""},{"AcctNum":"BK9050000","AcctName":"OTHER-FUND","key":"492","parent":""},{"AcctNum":"BK9050100","AcctName":"Partial Sale Proceeds","key":"493","parent":""},{"AcctNum":"BK9051100","AcctName":"Disposition Cost Reversal","key":"494","parent":""},{"AcctNum":"BK9052100","AcctName":"Net Proceeds from Sales","key":"495","parent":""},{"AcctNum":"BK9053100","AcctName":"Unrealized Appr\/Depr - Derivatives","key":"496","parent":""},{"AcctNum":"BK9054100","AcctName":"Unrealized Appr\/Depr - Incentive Fees","key":"497","parent":""},{"AcctNum":"BK9055100","AcctName":"Unrealized Appr\/Depr - N\/R","key":"498","parent":""},{"AcctNum":"BK9056100","AcctName":"Unrealized Appr\/Depr - Real Estate","key":"499","parent":""},{"AcctNum":"BK9057100","AcctName":"Unrealized Appr\/Depr - Joint Venture","key":"500","parent":""},{"AcctNum":"BK9058100","AcctName":"Unrealized Appr\/Depr - N\/P","key":"501","parent":""},{"AcctNum":"BK9059100","AcctName":"Unrealized Appr\/Depr - Other","key":"502","parent":""},{"AcctNum":"BK9060100","AcctName":"Unrealized Cumulative Appre\/Depre","key":"503","parent":""},{"AcctNum":"BK9061100","AcctName":"Unrealized Gain\/Loss - Foreign Exchange","key":"504","parent":""},{"AcctNum":"BK9062100","AcctName":"Unrealized Gain\/Loss - FX Real Estate","key":"505","parent":""},{"AcctNum":"BK9063100","AcctName":"Unrealized Gain\/Loss - FX Debt","key":"506","parent":""},{"AcctNum":"BK9064100","AcctName":"Realized - Securities","key":"507","parent":""},{"AcctNum":"BK9065100","AcctName":"Realized - Derivatives","key":"508","parent":""},{"AcctNum":"BK9066100","AcctName":"Realized - Incentive Fees","key":"509","parent":""},{"AcctNum":"BK9067100","AcctName":"Realized - N\/R","key":"510","parent":""},{"AcctNum":"BK9068100","AcctName":"Realized - Real Estate","key":"511","parent":""},{"AcctNum":"BK9069100","AcctName":"Realized - Joint Venture","key":"512","parent":""},{"AcctNum":"BK9070100","AcctName":"Realized - N\/P","key":"513","parent":""},{"AcctNum":"BK9071100","AcctName":"Realized - Other","key":"514","parent":""},{"AcctNum":"BK9072100","AcctName":"Realized - Foreign Exchange","key":"515","parent":""},{"AcctNum":"BK9073100","AcctName":"Minority Interest - Income","key":"516","parent":""},{"AcctNum":"BK9074100","AcctName":"Minority Interest - Appreciation","key":"517","parent":""},{"AcctNum":"BK9075100","AcctName":"Minority Interest - Offset","key":"518","parent":""},{"AcctNum":"BK9999001","AcctName":"Old mapping for Type B","key":"519","parent":""},{"AcctNum":"BK9999002","AcctName":"Old mapping for Type I","key":"520","parent":""},{"AcctNum":"BK9999003","AcctName":"Old mapping for Type C","key":"521","parent":""},{"AcctNum":"BK9999004","AcctName":"Old mapping for Type L","key":"522","parent":""},{"AcctNum":"BK9999005","AcctName":"Old mapping for Type M","key":"523","parent":""}
+ ]
+}
+    </textarea>
+  </div>
+</div>
+</body>
+</html>

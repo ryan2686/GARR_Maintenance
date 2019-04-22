@@ -14,15 +14,17 @@ import sqlite3
 #DatabaseInput = 'MRI_Source' #input("Enter Database Name: ")
 
 conn = sqlite3.connect('sandbox.db')
-#conn.text_factory = lambda x: unicode(x, "utf", "ignore")
-#"DRIVER={SQLite3 ODBC Driver};SERVER=localhost;DATABASE=test.db;Trusted_connection=yes"
 
 # Loads SQL query into pandas dataframe
 query_str = "SELECT RTRIM(LTRIM(GACC.ACCTNUM)) as AcctNum, RTRIM(LTRIM(GACC.ACCTNAME)) as AcctName, GACC.KEY, GACC.PARENT  FROM GACC;"
-GACC = pd.read_sql_query(query_str, conn)
-#GACC
-#GACC.to_json(orient='split')
 
+df = pd.read_sql_query(query_str, conn)
+
+#GACC
+#df1 = df.astype(object)
+gacc_json = df.to_json(path_or_buf='gacc_json.json', orient='records')
+
+print(gacc_json)
 #arg_account_dict = pd.read_sql("SELECT RTRIM(LTRIM(GARR.GROUPID)) as GroupID, RTRIM(LTRIM(GACC.ACCTNUM)) as AcctNum, RTRIM(LTRIM(GACC.ACCTNAME)) as AcctName FROM BKUSLP.BKUSLP.dbo.GACC GACC, BKUSLP.BKUSLP.dbo.GARR GARR WHERE ((GACC.ACCTNUM >= GARR.BEGACCT AND GACC.ACCTNUM <= GARR.ENDACCT) AND ( GARR.GROUPID IN  (SELECT GROUPID FROM BKUSLP.BKUSLP.dbo.GARR WHERE LEDGCODE = 'BK')))", conn)
 
 # edges = pd.read_sql("SELECT RTRIM(LTRIM(ARG.InvestorID)) as InvestorID, RTRIM(LTRIM(IA.InvestmentID)) as InvestmentID, RTRIM(LTRIM(IA.OwnershipPct)) as label FROM BKUSLP.HARMONY_IMPL.DBO.IA_RELATIONSHIP2 IA, BKUSLP.HARMONY_IMPL.DBO.ENTITY EN WHERE IA.InvestorID = EN.ENTITYID AND EN.LEDGCODE = 'BK'", conn)
@@ -54,3 +56,8 @@ GACC = pd.read_sql_query(query_str, conn)
 #         This should also help later on because each node is explicitly ID'd in rendered HTML which will 
 #         help when making drag 'n' drop application.
 #render('dot', 'svg', 'GARR_STRUCTURE.dot', renderer= None, formatter= None, quiet= False)
+
+
+conn.close()
+#%%
+conn.close()

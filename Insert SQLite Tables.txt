@@ -6,6 +6,13 @@ create table GACC(ACCTNUM character(10) PRIMARY KEY NOT NULL, ACCTNAME character
 create table GARH(GROUPID character(15) PRIMARY KEY NOT NULL, LEDGCODE character(2) NOT NULL, DESCRPTN character(40), LASTDATE datetime, USERID character(20), KEY INT, PARENT INT);
 create table GARR(GROUPID character(15) PRIMARY KEY NOT NULL, LEDGCODE character(2) NOT NULL, BEGACCT character(10) NOT NULL, ENDACCT character(10) NOT NULL);
 
+
+create table GACC(ACCTNUM varchar PRIMARY KEY NOT NULL, ACCTNAME varchar, TYPE varchar NOT NULL, LASTDATE datetime, USERID varchar, M_1099ACCT varchar, DPRSTR varchar, PEXCHTYPE varchar, OWNERTAX varchar, SUBWITH varchar, ACCTBASIS varchar, LEGALACCT varchar, ACTIVE varchar NOT NULL, KEY varchar, PARENT varchar);
+create table GARH(GROUPID varchar PRIMARY KEY NOT NULL, LEDGCODE varchar NOT NULL, DESCRPTN varchar, LASTDATE datetime, USERID varchar, KEY varchar, PARENT varchar);
+create table GARR(GROUPID varchar PRIMARY KEY NOT NULL, LEDGCODE varchar NOT NULL, BEGACCT varchar NOT NULL, ENDACCT varchar NOT NULL);
+
+
+
 .mode csv
 .import C:/Users/RFrench/Desktop/PDF/GACC.csv GACC
 
@@ -16,3 +23,7 @@ conn_str = (
      r'Trusted_Connection=Yes;'
      r'DATABASE=' + DatabaseInput + ';'
 )
+
+BK1400000 
+
+UPDATE GACC SET ACCTNAME = 'WORK IN PROGRESS' WHERE ACCTNUM = 'BK1400000 ';
