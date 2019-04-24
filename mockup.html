@@ -10,8 +10,8 @@
   
   <script src="https://unpkg.com/gojs/release/go.js"></script> 
   
-   <link rel="stylesheet" href="../dataInspector.css" /> 
-  <script src="../dataInspector.js"></script>
+   <link rel="stylesheet" href="./dataInspector.css" /> 
+  <script src="./dataInspector.js"></script>
 
   <script id="code">
     function init() {
@@ -23,7 +23,7 @@
             maxSelectionCount: 1, // users can select only one part at a time
             validCycle: go.Diagram.CycleDestinationTree, // make sure users can only create trees
             "clickCreatingTool.archetypeNodeData": { // allow double-click in background to create a new node
-              AcctName: "(new person)",
+              AcctName: "(new account)",
               AcctNum: "",
               comments: ""
             },
@@ -287,7 +287,7 @@
           $(go.Shape, { strokeWidth: 4, stroke: "#00a4a4" }));  // the link shape
       // read in the JSON-format data from the "mySavedModel" element
       load();
-      // support editing the properties of the selected person in HTML
+      // support editing the properties of the selected account in HTML
       if (window.Inspector) myInspector = new Inspector("myInspector", myDiagram,
         {
           properties: {
@@ -326,7 +326,7 @@
     This editable organizational chart sample color-codes the Nodes according to the tree level in the hierarchy.
   </p>
   <p>
-    Double click on a node in order to add a person or the diagram background to add a new Parent. Double clicking the diagram uses the <a>ClickCreatingTool</a>
+    Double click on a node in order to add an account or the diagram background to add a new Parent. Double clicking the diagram uses the <a>ClickCreatingTool</a>
     with a custom <a>ClickCreatingTool.insertPart</a> to scroll to the new node and start editing the <a>TextBlock</a> for its name .
   </p>
   <p>
@@ -334,7 +334,7 @@
     You can also draw a link from a node's background to other nodes that have no "Parent". Links can also be relinked to change relationships.
     Right-click or tap-hold a Node to bring up a context menu which allows you to:
     <ul>
-      <li>Vacate Position - remove the information specfic to the current person in that role</li>
+      <li>Vacate Position - remove the information specfic to the current account in that role</li>
       <li>Remove Role - removes the role entirely and reparents any children</li>
       <li>Remove Department - removes the role and the whole subtree</li>
     </ul>
